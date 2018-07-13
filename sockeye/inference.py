@@ -760,6 +760,7 @@ class Translator:
         self.interpolation_func = self._get_interpolation_func(ensemble_mode)
         self.beam_size = self.models[0].beam_size
         self.batch_size = self.models[0].batch_size
+        self.num_heads = self.models[0].decoder.get_num_heads()
         # after models are loaded we ensured that they agree on max_input_length, max_output_length and batch size
         self.max_input_length = self.models[0].max_input_length
         self.max_output_length = self.models[0].get_max_output_length(self.max_input_length)
@@ -1149,8 +1150,8 @@ class Translator:
         lengths = mx.nd.ones((self.batch_size * self.beam_size, 1), ctx=self.context)
         finished = mx.nd.zeros((self.batch_size * self.beam_size,), ctx=self.context, dtype='int32')
 
-        # attentions: (batch_size * beam_size, output_length, encoded_source_length)
-        attentions = mx.nd.zeros((self.batch_size * self.beam_size, max_output_length, encoded_source_length),
+        # attentions: (batch_size * beam_size, heads, output_length, encoded_source_length)
+        attentions = mx.nd.zeros((self.batch_size * self.beam_size, self.num_heads, max_output_length, encoded_source_length),
                                  ctx=self.context)
 
         # best_hyp_indices: row indices of smallest scores (ascending).
@@ -1246,7 +1247,7 @@ class Translator:
             # (5) update best hypotheses, their attention lists and lengths (only for non-finished hyps)
             # pylint: disable=unsupported-assignment-operation
             sequences[:, t] = best_word_indices
-            attentions[:, t, :] = attention_scores
+            attentions[:, :, t, :] = attention_scores
             lengths += mx.nd.cast(1 - mx.nd.expand_dims(finished, axis=1), dtype='float32')
 
             # (6) determine which hypotheses in the beam are now finished
@@ -1279,13 +1280,12 @@ class Translator:
                               == accumulated_scores.shape[0] == lengths.shape[0], "Shape mismatch")
         # sequences & accumulated scores are in latest 'k-best order', thus 0th element is best
         best = 0
+        head = 0
         result = []
         for sent in range(self.batch_size):
             idx = sent * self.beam_size + best
             length = int(lengths[idx].asscalar())
             sequence = sequences[idx][:length].asnumpy().tolist()
-            # attention_matrix: (target_seq_len, source_seq_len)
-            attention_matrix = np.stack(attention_lists[idx].asnumpy()[:length, :], axis=0)
             score = accumulated_scores[idx].asscalar()
             # construct k-best list
             k_best = []
@@ -1295,6 +1295,8 @@ class Translator:
                 _score = accumulated_scores[index].asscalar()
                 k_best.append((_seq, _score))
 
+            # attention_matrix: (target_seq_len, source_seq_len)
+            attention_matrix = np.stack(attention_lists[idx].asnumpy()[head, :length, :], axis=0)
             result.append(Translation(sequence, attention_matrix, score, k_best))
         return result
 
@@ -1329,9 +1331,9 @@ class Translator:
         lengths = mx.nd.ones((self.batch_size, 1), ctx=self.context)
         finished = mx.nd.zeros((self.batch_size,), ctx=self.context, dtype='int32')
 
-        # attentions: (batch_size, output_length, encoded_source_length)
-        attentions = mx.nd.zeros((self.batch_size, target_length, encoded_source_length),
-                                 ctx=self.context)
+        # attentions: (batch_size, heads, output_length, encoded_source_length)
+        attentions = mx.nd.zeros((self.batch_size, self.num_heads, target_length, encoded_source_length),
+                                  ctx=self.context)
 
         # best_word_indices: column indices of smallest scores (ascending).
         best_word_indices = mx.nd.zeros((self.batch_size,), ctx=self.context, dtype='int32')
@@ -1412,7 +1414,7 @@ class Translator:
             # (5) update best hypotheses, their attention lists and lengths (only for non-finished hyps)
             # pylint: disable=unsupported-assignment-operation
             sequences[:, t] = best_word_indices
-            attentions[:, t, :] = attention_scores
+            attentions[:, :, t, :] = attention_scores
             lengths += mx.nd.cast(1 - mx.nd.expand_dims(finished, axis=1), dtype='float32')
 
             # (7) determine which hypotheses in the beam are now finished
@@ -1420,13 +1422,14 @@ class Translator:
             if mx.nd.sum(finished).asscalar() == self.batch_size:  # all finished
                 break
 
+        head = 0
         result = []
         for sent in range(self.batch_size):
             idx = sent
             length = int(lengths[idx].asscalar())
             sequence = sequences[idx][:length].asnumpy().tolist()
             # attention_matrix: (target_seq_len, source_seq_len)
-            attention_matrix = np.stack(attentions[idx].asnumpy()[:length, :], axis=0)
+            attention_matrix = np.stack(attentions[idx].asnumpy()[head, :length, :], axis=0)
             score = scores_accumulated[idx].asscalar()
             result.append(Translation(sequence, attention_matrix, score, [(sequence, score)]))
 
