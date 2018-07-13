@@ -276,7 +276,7 @@ def dot_attention(queries: mx.sym.Symbol,
                   lengths: Optional[mx.sym.Symbol] = None,
                   dropout: float = 0.0,
                   bias: Optional[mx.sym.Symbol] = None,
-                  prefix: Optional[str] = ''):
+                  prefix: Optional[str] = '') -> Tuple[mx.sym.Symbol, mx.sym.Symbol]:
     """
     Computes dot attention for a set of queries, keys, and values.
 
@@ -313,7 +313,7 @@ def dot_attention(queries: mx.sym.Symbol,
     probs = mx.sym.Dropout(probs, p=dropout) if dropout > 0.0 else probs
 
     # (n, lq, lk) x (n, lk, dv) -> (n, lq, dv)
-    return mx.sym.batch_dot(lhs=probs, rhs=values, name='%scontexts' % prefix)
+    return mx.sym.batch_dot(lhs=probs, rhs=values, name='%scontexts' % prefix), probs
 
 
 class MultiHeadAttentionBase:
@@ -349,7 +349,7 @@ class MultiHeadAttentionBase:
                 keys: mx.sym.Symbol,
                 values: mx.sym.Symbol,
                 lengths: Optional[mx.sym.Symbol] = None,
-                bias: Optional[mx.sym.Symbol] = None) -> mx.sym.Symbol:
+                bias: Optional[mx.sym.Symbol] = None) -> Tuple[mx.sym.Symbol, mx.sym.Symbol]:
         """
         Returns context vectors of multi-head dot attention.
 
@@ -370,7 +370,7 @@ class MultiHeadAttentionBase:
         lengths = broadcast_to_heads(lengths, self.heads, ndim=1, fold_heads=True) if lengths is not None else lengths
 
         # (batch*heads, query_max_length, depth_per_head)
-        contexts = dot_attention(queries, keys, values,
+        contexts, attention_probs = dot_attention(queries, keys, values,
                                  lengths=lengths, dropout=self.dropout, bias=bias, prefix=self.prefix)
 
         # (batch, query_max_length, depth)
@@ -383,7 +383,10 @@ class MultiHeadAttentionBase:
                                          num_hidden=self.depth_out,
                                          flatten=False)
 
-        return contexts
+        # (batch, heads, query_max_length, key_max_length)
+        attention_probs = attention_probs.reshape((-4, -1, self.heads, -2))
+
+        return contexts, attention_probs
 
 
 class MultiHeadSelfAttention(MultiHeadAttentionBase):
@@ -411,7 +414,7 @@ class MultiHeadSelfAttention(MultiHeadAttentionBase):
                  inputs: mx.sym.Symbol,
                  input_lengths: Optional[mx.sym.Symbol] = None,
                  bias: Optional[mx.sym.Symbol] = None,
-                 cache: Optional[Dict[str, Optional[mx.sym.Symbol]]] = None) -> mx.sym.Symbol:
+                 cache: Optional[Dict[str, Optional[mx.sym.Symbol]]] = None) -> Tuple[mx.sym.Symbol, mx.sym.Symbol]:
         """
         Computes multi-head attention on a set of inputs, serving as queries, keys, and values.
         If sequence lengths are provided, they will be used to mask the attention scores.
@@ -476,7 +479,7 @@ class MultiHeadAttention(MultiHeadAttentionBase):
                  queries: mx.sym.Symbol,
                  memory: mx.sym.Symbol,
                  memory_lengths: Optional[mx.sym.Symbol] = None,
-                 bias: Optional[mx.sym.Symbol] = None) -> mx.sym.Symbol:
+                 bias: Optional[mx.sym.Symbol] = None) -> Tuple[mx.sym.Symbol, mx.sym.Symbol]:
         """
         Computes multi-head attention for queries given a memory tensor.
         If sequence lengths are provided, they will be used to mask the attention scores.
@@ -570,7 +573,7 @@ class ProjectedDotAttention:
         queries = queries * (self.num_hidden ** -0.5)
 
         # (batch, queries_max_length, num_hidden)
-        contexts = dot_attention(queries, keys, values, memory_lengths)
+        contexts = dot_attention(queries, keys, values, memory_lengths)[0]
 
         return contexts
 
@@ -594,7 +597,7 @@ class PlainDotAttention:
         """
 
         # (batch*heads, queries_max_length, depth_per_head)
-        contexts = dot_attention(queries, memory, memory, memory_lengths)
+        contexts = dot_attention(queries, memory, memory, memory_lengths)[0]
 
         return contexts
 

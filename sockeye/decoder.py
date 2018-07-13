@@ -162,6 +162,9 @@ class Decoder(ABC):
         """
         return None
 
+    def get_num_heads(self) -> int:
+        return 1
+
 
 class TransformerDecoder(Decoder):
     """
@@ -237,7 +240,7 @@ class TransformerDecoder(Decoder):
             target = layer(target=target,
                            target_bias=target_bias,
                            source=source_encoded,
-                           source_bias=source_bias)
+                           source_bias=source_bias)[0]
         target = self.final_process(data=target, prev=None)
 
         return target
@@ -287,11 +290,11 @@ class TransformerDecoder(Decoder):
         layer_caches = self._get_layer_caches_from_states(list(states))
         cache = []  # type: List[mx.sym.Symbol]
         for layer, layer_cache in zip(self.layers, layer_caches):
-            target = layer(target=target,
-                           target_bias=target_bias,
-                           source=source_encoded,
-                           source_bias=source_bias,
-                           cache=layer_cache)
+            target, attention_probs = layer(target=target,
+                           		    target_bias=target_bias,
+                           		    source=source_encoded,
+                           		    source_bias=source_bias,
+                           		    cache=layer_cache)
             # store updated keys and values in the cache.
             # (layer.__call__() has the side-effect of updating contents of layer_cache)
             cache += [layer_cache['k'], layer_cache['v']]
@@ -303,10 +306,16 @@ class TransformerDecoder(Decoder):
         target = mx.sym.reshape(target, shape=(-3, -1))
 
         # TODO(fhieber): no attention probs for now
-        attention_probs = mx.sym.sum(mx.sym.zeros_like(source_encoded), axis=2, keepdims=False)
+        # attention_probs = mx.sym.sum(mx.sym.zeros_like(source_encoded), axis=2, keepdims=False)
+
+        # (batch_size, heads, source_seq_length)
+        attention_probs = attention_probs.reshape((0, -3, -1))
 
         new_states = [source_encoded, source_encoded_lengths, cache]
         return target, attention_probs, new_states
+
+    def get_num_heads(self) -> int:
+        return self.config.attention_heads
 
     def _get_layer_caches_from_states(self, states: List[mx.sym.Symbol]) -> List[Dict[str, Optional[mx.sym.Symbol]]]:
         """
@@ -613,7 +622,10 @@ class RecurrentDecoder(Decoder):
                       source_encoded_length,
                       state.hidden] + state.layer_states
 
-        return state.hidden, attention_state.probs, new_states
+        # attention_probs: (batch_size, 1, source_seq_len)
+        attention_probs = attention_state.probs.reshape((-4, -1, 1, -2))
+
+        return state.hidden, attention_probs, new_states
 
     def reset(self):
         """
@@ -1117,10 +1129,10 @@ class ConvolutionalDecoder(Decoder):
                 # (batch_size, 1, num_hidden) -> (batch_size, num_hidden)
                 target_hidden = mx.sym.reshape(target_hidden_step, shape=(-3, -1))
 
-        # (batch_size, source_encoded_max_length)
+        # (batch_size, 1, source_encoded_max_length)
         attention_probs = mx.sym.reshape(mx.sym.slice_axis(mx.sym.zeros_like(source_encoded),
                                                            axis=2, begin=0, end=1),
-                                         shape=(0, -1))
+                                         shape=(-4, -1, 1, -1))
 
         return target_hidden, attention_probs, [source_encoded, source_encoded_lengths] + new_layer_states
 
