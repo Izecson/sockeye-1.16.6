@@ -536,12 +536,42 @@ A chunk of a TranslatorInput.
 :param tokens: List of input tokens.
 """
 
+ScorerInput = NamedTuple('ScorerInput', [
+    ('id', int),
+    ('sentence', str),
+    ('tokens', Tokens),
+    ('target_tokens', Tokens),
+])
+"""
+Required input for Translator.
+
+:param id: Sentence id.
+:param sentence: Input sentence.
+:param tokens: List of input tokens.
+:param target_tokens: List of target tokens.
+"""
+
+ScorerInputChunk = NamedTuple("ScorerInputChunk",
+                        [("id", int),
+                         ("chunk_id", int),
+                         ("tokens", Tokens),
+                         ("target_tokens", Tokens)])
+"""
+A chunk of a TranslatorInput.
+
+:param id: Sentence id.
+:param chunk_id: The id of the chunk.
+:param tokens: List of input tokens.
+:param target_tokens: List of target tokens.
+"""
+
 TranslatorOutput = NamedTuple('TranslatorOutput', [
     ('id', int),
     ('translation', str),
     ('tokens', List[str]),
     ('attention_matrix', np.ndarray),
     ('score', float),
+    ('k_best', List[Tuple[str, float]]),
 ])
 """
 Output structure from Translator.
@@ -557,7 +587,8 @@ TokenIds = List[int]
 Translation = NamedTuple('Translation', [
     ('target_ids', TokenIds),
     ('attention_matrix', np.ndarray),
-    ('score', float)
+    ('score', float),
+    ('k_best', List[Tuple[TokenIds, float]]),
 ])
 
 TranslatedChunk = NamedTuple('TranslatedChunk', [
@@ -652,6 +683,27 @@ def _concat_translations(translations: List[Translation], start_id: int, stop_id
                 target_ids.extend(translation.target_ids[1:])
                 attention_matrices.append(translation.attention_matrix[1:, :])
 
+    # Combine k-best list
+    combined_k_best = []
+    for kidx in range(len(translations[0].k_best)):
+        tids = [start_id]
+        avg_score = 0
+        for idx, translation in enumerate(translations):
+            target, score = translation.k_best[kidx]
+            assert target[0] == start_id
+
+            if idx == len(translations) - 1:
+                tids.extend(target[1:])
+            else:
+                if target[-1] in stop_ids:
+                    tids.extend(target[1:-1])
+                else:
+                    tids.extend(target[1:])
+            avg_score += score * length_penalty(len(target))
+
+        avg_score = avg_score / length_penalty(len(tids))
+        combined_k_best.append((tids, avg_score))
+
     # Combine attention matrices:
     attention_shapes = [attention_matrix.shape for attention_matrix in attention_matrices]
     # Adding another row for the empty BOS alignment vector
@@ -669,7 +721,7 @@ def _concat_translations(translations: List[Translation], start_id: int, stop_id
     score = sum(translation.score * length_penalty(len(translation.target_ids))
                 for translation in translations)
     score = score / length_penalty(len(target_ids))
-    return Translation(target_ids, attention_matrix_combined, score)
+    return Translation(target_ids, attention_matrix_combined, score, combined_k_best)
 
 
 class Translator:
@@ -710,7 +762,7 @@ class Translator:
         self.batch_size = self.models[0].batch_size
         # after models are loaded we ensured that they agree on max_input_length, max_output_length and batch size
         self.max_input_length = self.models[0].max_input_length
-        max_output_length = self.models[0].get_max_output_length(self.max_input_length)
+        self.max_output_length = self.models[0].get_max_output_length(self.max_input_length)
         if bucket_source_width > 0:
             self.buckets_source = data_io.define_buckets(self.max_input_length, step=bucket_source_width)
         else:
@@ -759,6 +811,21 @@ class Translator:
         """
         tokens = list(data_io.get_tokens(sentence))
         return TranslatorInput(id=sentence_id, sentence=sentence.rstrip(), tokens=tokens)
+
+    @staticmethod
+    def make_scorer_input(sentence_id: int, sentence: str, target: str) -> ScorerInput:
+        """
+        Returns ScorerInput from input_string and target_string
+
+        :param sentence_id: Input sentence id.
+        :param sentence: Input sentence.
+        :param target: Target sentence.
+        :return: Input for model_score method.
+        """
+        input_tokens = list(data_io.get_tokens(sentence))
+        target_tokens = list(data_io.get_tokens(target))
+        target_tokens.append(C.EOS_SYMBOL)
+        return ScorerInput(id=sentence_id, sentence=sentence.rstrip(), tokens=input_tokens, target_tokens=target_tokens)
 
     def translate(self, trans_inputs: List[TranslatorInput]) -> List[TranslatorOutput]:
         """
@@ -825,6 +892,74 @@ class Translator:
 
         return results
 
+    def model_score(self, trans_inputs: List[ScorerInput]) -> List[TranslatorOutput]:
+        """
+        Batch-translates a list of TranslatorInputs, returns a list of TranslatorOutputs.
+        Splits oversized sentences to sentence chunks of size less than max_input_length.
+
+        :param trans_inputs: List of TranslatorInputs as returned by make_input().
+        :return: List of translation results.
+        """
+        translated_chunks = []
+
+        # split into chunks
+        input_chunks = []  # type: List[ScorerInputChunk]
+        for input_idx, trans_input in enumerate(trans_inputs):
+            if len(trans_input.tokens) == 0:
+                empty_translation = Translation(target_ids=[],
+                                                attention_matrix=np.asarray([[0]]),
+                                                score=-np.inf,
+						k_best=[])
+                translated_chunks.append(TranslatedChunk(id=input_idx,
+                                                         chunk_id=0,
+                                                         translation=empty_translation))
+            elif len(trans_input.tokens) > self.max_input_length:
+                logger.debug(
+                    "Input %d has length (%d) that exceeds max input length (%d). Splitting into chunks of size %d.",
+                    trans_input.id, len(trans_input.tokens), self.buckets_source[-1], self.max_input_length)
+                token_chunks = utils.chunks(trans_input.tokens, self.max_input_length)
+                tgt_token_chunks = utils.chunks(trans_input.target_tokens, self.max_output_length)
+                input_chunks.extend(ScorerInputChunk(input_idx, chunk_id, chunk[0], chunk[1])
+                                    for chunk_id, chunk in enumerate(zip(token_chunks, tgt_token_chunks)))
+            else:
+                input_chunks.append(ScorerInputChunk(input_idx, 0, trans_input.tokens, trans_input.target_tokens))
+        # Sort longest to shortest (to rather fill batches of shorter than longer sequences)
+        input_chunks = sorted(input_chunks, key=lambda chunk: len(chunk.tokens), reverse=True)
+
+        # translate in batch-sized blocks over input chunks
+        for batch_id, chunks in enumerate(utils.grouper(input_chunks, self.batch_size)):
+            batch = [(chunk.tokens, chunk.target_tokens) for chunk in chunks]
+            logger.debug("Translating batch %d", batch_id)
+            # underfilled batch will be filled to a full batch size with copies of the 1st input
+            rest = self.batch_size - len(batch)
+            if rest > 0:
+                logger.debug("Extending the last batch to the full batch size (%d)", self.batch_size)
+                batch = batch + [batch[0]] * rest
+
+            batch_translations = self._translate_to_target(*self._get_inference_pair(batch))
+            # truncate to remove filler translations
+            if rest > 0:
+                batch_translations = batch_translations[:-rest]
+            for chunk, translation in zip(chunks, batch_translations):
+                translated_chunks.append(TranslatedChunk(chunk.id, chunk.chunk_id, translation))
+        # Sort by input idx and then chunk id
+        translated_chunks = sorted(translated_chunks)
+
+        # Concatenate results
+        results = []
+        chunks_by_input_idx = itertools.groupby(translated_chunks, key=lambda translation: translation.id)
+        for trans_input, (input_idx, chunks) in zip(trans_inputs, chunks_by_input_idx):
+            chunks = list(chunks)
+            if len(chunks) == 1:
+                translation = chunks[0].translation
+            else:
+                translations_to_concat = [translated_chunk.translation for translated_chunk in chunks]
+                translation = self._concat_translations(translations_to_concat)
+
+            results.append(self._make_result(trans_input, translation))
+
+        return results
+
     def _get_inference_input(self, sequences: List[List[str]]) -> Tuple[mx.nd.NDArray, int]:
         """
         Returns NDArray of source ids (shape=(batch_size, bucket_key)) and corresponding bucket_key.
@@ -839,6 +974,19 @@ class Translator:
         for j, tokens in enumerate(sequences):
             source[j, :len(tokens)] = data_io.tokens2ids(tokens, self.vocab_source)
         return source, bucket_key
+
+    def _get_inference_pair(self, sequences: List[Tuple[List[str], List[str]]]) -> Tuple[mx.nd.NDArray, int, mx.nd.NDArray, int]:
+        bucket_key = data_io.get_bucket(max(len(src) for src, tgt in sequences), self.buckets_source)
+
+        utils.check_condition(C.PAD_ID == 0, "pad id should be 0")
+        output_length = max(len(tgt) for src, tgt in sequences)
+        source = mx.nd.zeros((len(sequences), bucket_key))
+        target = mx.nd.zeros((len(sequences), output_length))
+        for j, pair in enumerate(sequences):
+            src, tgt = pair[0], pair[1]
+            source[j, :len(src)] = data_io.tokens2ids(src, self.vocab_source)
+            target[j, :len(tgt)] = data_io.tokens2ids(tgt, self.vocab_target)
+        return source, bucket_key, target, output_length
 
     def _make_result(self,
                      trans_input: TranslatorInput,
@@ -861,11 +1009,22 @@ class Translator:
             target_id not in self.stop_ids)
         attention_matrix = attention_matrix[:, :len(trans_input.tokens)]
 
+        # construct k-best list
+        k_best = []
+        for _target_ids, _score in translation.k_best:
+            _target_ids = _target_ids[1:]
+            _target_tokens = [self.vocab_target_inv[target_id] for target_id in _target_ids]
+            _target_string = C.TOKEN_SEPARATOR.join(
+                target_token for target_id, target_token in zip(_target_ids, _target_tokens) if
+                target_id not in self.stop_ids)
+            k_best.append((_target_string, _score))
+
         return TranslatorOutput(id=trans_input.id,
                                 translation=target_string,
                                 tokens=target_tokens,
                                 attention_matrix=attention_matrix,
-                                score=translation.score)
+                                score=translation.score,
+                                k_best=k_best)
 
     def _concat_translations(self, translations: List[Translation]) -> Translation:
         """
@@ -1127,5 +1286,152 @@ class Translator:
             # attention_matrix: (target_seq_len, source_seq_len)
             attention_matrix = np.stack(attention_lists[idx].asnumpy()[:length, :], axis=0)
             score = accumulated_scores[idx].asscalar()
-            result.append(Translation(sequence, attention_matrix, score))
+            # construct k-best list
+            k_best = []
+            for index in range(idx, sent * self.beam_size + self.beam_size):
+                _length = int(lengths[index].asscalar())
+                _seq = sequences[index][:_length].asnumpy().tolist()
+                _score = accumulated_scores[index].asscalar()
+                k_best.append((_seq, _score))
+
+            result.append(Translation(sequence, attention_matrix, score, k_best))
         return result
+
+    def _translate_to_target(self,
+                     source: mx.nd.NDArray,
+                     source_length: int,
+                     target: mx.nd.NDArray,
+                     target_length: int) -> Tuple[mx.nd.NDArray, mx.nd.NDArray,
+                                                  mx.nd.NDArray, mx.nd.NDArray]:
+        """
+        Translates multiple source sentences to their corresponding target sentences to get their model scores.
+        :param source: Source ids. Shape: (batch_size, bucket_key).
+        :param source_length: Max source length.
+        :param target: Target ids. Shape: (batch_size, bucket_key).
+        :param target_length: Max target length.
+        :return List of lists of word ids, list of attentions, array of accumulated length-normalized
+                negative log-probs.
+        """
+        # Length of encoded sequence (may differ from initial input length)
+        encoded_source_length = self.models[0].encoder.get_encoded_seq_len(source_length)
+        utils.check_condition(all(encoded_source_length ==
+                                  model.encoder.get_encoded_seq_len(source_length) for model in self.models),
+                              "Models must agree on encoded sequence length")
+
+        # General data structure: each row has batch_size * beam blocks for the 1st sentence, with a full beam,
+        # then the next block for the 2nd sentence and so on
+
+        # sequences: (batch_size, output_length), pre-filled with <s> symbols on index 0
+        sequences = mx.nd.full((self.batch_size, target_length), val=C.PAD_ID, ctx=self.context,
+                               dtype='int32')
+        sequences[:, 0] = self.start_id
+
+        lengths = mx.nd.ones((self.batch_size, 1), ctx=self.context)
+        finished = mx.nd.zeros((self.batch_size,), ctx=self.context, dtype='int32')
+
+        # attentions: (batch_size, output_length, encoded_source_length)
+        attentions = mx.nd.zeros((self.batch_size, target_length, encoded_source_length),
+                                 ctx=self.context)
+
+        # best_word_indices: column indices of smallest scores (ascending).
+        best_word_indices = mx.nd.zeros((self.batch_size,), ctx=self.context, dtype='int32')
+        # scores_accumulated: chosen smallest scores in scores (ascending).
+        scores_accumulated = mx.nd.zeros((self.batch_size, 1), ctx=self.context)
+
+        # reset all padding distribution cells to np.inf
+        self.pad_dist[:] = np.inf
+
+        # If using a top-k lexicon, select param rows for logit computation that correspond to the
+        # target vocab for this sentence.
+        models_output_layer_w = list()
+        models_output_layer_b = list()
+        pad_dist = self.pad_dist
+        vocab_slice_ids = None  # type: mx.nd.NDArray
+        if self.restrict_lexicon:
+            # TODO: See note in method about migrating to pure MXNet when set operations are supported.
+            #       We currently convert source to NumPy and target ids back to NDArray.
+            source_words = source.split(num_outputs=self.num_source_factors, axis=2, squeeze_axis=True)[0]
+            vocab_slice_ids = mx.nd.array(self.restrict_lexicon.get_trg_ids(source_words.astype("int32").asnumpy()),
+                                          ctx=self.context)
+
+            if vocab_slice_ids.shape[0] <= 1:
+                # This fixes an edge case for toy models, where the number of vocab ids from the lexicon is
+                # smaller than the beam size.
+                logger.warning("Padding vocab_slice_ids (%d) with EOS to have at least 2 elements to expand",
+                               vocab_slice_ids.shape[0])
+                n = 2 - vocab_slice_ids.shape[0]
+                vocab_slice_ids = mx.nd.concat(vocab_slice_ids,
+                                               mx.nd.full((n,), val=self.vocab_target[C.EOS_SYMBOL], ctx=self.context),
+                                               dim=0)
+
+            pad_dist = mx.nd.full((self.batch_size, vocab_slice_ids.shape[0]),
+                                  val=np.inf, ctx=self.context)
+            for m in self.models:
+                models_output_layer_w.append(m.output_layer_w.take(vocab_slice_ids))
+                models_output_layer_b.append(m.output_layer_b.take(vocab_slice_ids))
+
+        # mxnet implementation is faster on GPUs
+        use_mxnet_topk = self.context != mx.cpu()
+        # offset for hypothesis indices in batch decoding
+        offset = np.repeat(np.arange(0, self.batch_size, 1), 1)
+
+        # (0) encode source sentence, returns a list
+        model_states = self._encode(source, source_length)
+
+        for t in range(1, target_length):
+
+            # (1) obtain next predictions and advance models' state
+            # scores: (batch_size, target_vocab_size)
+            # attention_scores: (batch_size, bucket_key)
+            scores, attention_scores, model_states = self._decode_step(sequences,
+                                                                       t,
+                                                                       source_length,
+                                                                       model_states,
+                                                                       models_output_layer_w,
+                                                                       models_output_layer_b)
+
+            # (2) compute length-normalized accumulated scores in place
+            if t == 1 and self.batch_size == 1:  # only one hypothesis at t==1
+                scores = scores[:1] / self.length_penalty(lengths[:1])
+            else:
+                # renormalize scores by length ...
+                scores = (scores + scores_accumulated * self.length_penalty(lengths - 1)) / self.length_penalty(lengths)
+                # ... but not for finished hyps.
+                # their predicted distribution is set to their accumulated scores at C.PAD_ID.
+                pad_dist[:, C.PAD_ID] = scores_accumulated[:, 0]
+                # this is equivalent to doing this in numpy:
+                #   pad_dist[finished, :] = np.inf
+                #   pad_dist[finished, C.PAD_ID] = scores_accumulated[finished]
+                scores = mx.nd.where(finished, pad_dist, scores)
+
+            # (3) select the right hypotheses for each sentence block separately
+            best_word_indices = mx.nd.array(target[:, t - 1], ctx=self.context)
+            scores_accumulated = mx.nd.array(scores.asnumpy()[range(self.batch_size), best_word_indices.astype("int32").asnumpy()].reshape(-1, 1), ctx=self.context)
+            
+            # Map from restricted to full vocab ids if needed
+            if self.restrict_lexicon:
+                best_word_indices[:] = vocab_slice_ids.take(best_word_indices)
+
+            # (5) update best hypotheses, their attention lists and lengths (only for non-finished hyps)
+            # pylint: disable=unsupported-assignment-operation
+            sequences[:, t] = best_word_indices
+            attentions[:, t, :] = attention_scores
+            lengths += mx.nd.cast(1 - mx.nd.expand_dims(finished, axis=1), dtype='float32')
+
+            # (7) determine which hypotheses in the beam are now finished
+            finished = ((best_word_indices == C.PAD_ID) + (best_word_indices == self.vocab_target[C.EOS_SYMBOL]))
+            if mx.nd.sum(finished).asscalar() == self.batch_size:  # all finished
+                break
+
+        result = []
+        for sent in range(self.batch_size):
+            idx = sent
+            length = int(lengths[idx].asscalar())
+            sequence = sequences[idx][:length].asnumpy().tolist()
+            # attention_matrix: (target_seq_len, source_seq_len)
+            attention_matrix = np.stack(attentions[idx].asnumpy()[:length, :], axis=0)
+            score = scores_accumulated[idx].asscalar()
+            result.append(Translation(sequence, attention_matrix, score, [(sequence, score)]))
+
+        return result
+
