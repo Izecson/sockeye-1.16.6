@@ -843,7 +843,8 @@ class Translator:
             if len(trans_input.tokens) == 0:
                 empty_translation = Translation(target_ids=[],
                                                 attention_matrix=np.asarray([[0]]),
-                                                score=-np.inf)
+                                                score=-np.inf,
+                                                k_best=[])
                 translated_chunks.append(TranslatedChunk(id=input_idx,
                                                          chunk_id=0,
                                                          translation=empty_translation))
@@ -892,12 +893,12 @@ class Translator:
 
         return results
 
-    def model_score(self, trans_inputs: List[ScorerInput]) -> List[TranslatorOutput]:
+    def run_scorer(self, trans_inputs: List[ScorerInput]) -> List[TranslatorOutput]:
         """
-        Batch-translates a list of TranslatorInputs, returns a list of TranslatorOutputs.
+        Batch-scores a list of TranslatorInputs, returns a list of TranslatorOutputs.
         Splits oversized sentences to sentence chunks of size less than max_input_length.
 
-        :param trans_inputs: List of TranslatorInputs as returned by make_input().
+        :param trans_inputs: List of ScorerInputs as returned by make_scorer_input().
         :return: List of translation results.
         """
         translated_chunks = []
@@ -909,7 +910,7 @@ class Translator:
                 empty_translation = Translation(target_ids=[],
                                                 attention_matrix=np.asarray([[0]]),
                                                 score=-np.inf,
-						k_best=[])
+						                        k_best=[])
                 translated_chunks.append(TranslatedChunk(id=input_idx,
                                                          chunk_id=0,
                                                          translation=empty_translation))
@@ -918,7 +919,7 @@ class Translator:
                     "Input %d has length (%d) that exceeds max input length (%d). Splitting into chunks of size %d.",
                     trans_input.id, len(trans_input.tokens), self.buckets_source[-1], self.max_input_length)
                 token_chunks = utils.chunks(trans_input.tokens, self.max_input_length)
-                tgt_token_chunks = utils.chunks(trans_input.target_tokens, self.max_output_length)
+                tgt_token_chunks = utils.chunks(trans_input.target_tokens, len(trans_input.target_tokens))
                 input_chunks.extend(ScorerInputChunk(input_idx, chunk_id, chunk[0], chunk[1])
                                     for chunk_id, chunk in enumerate(zip(token_chunks, tgt_token_chunks)))
             else:
@@ -1298,11 +1299,10 @@ class Translator:
         return result
 
     def _translate_to_target(self,
-                     source: mx.nd.NDArray,
-                     source_length: int,
-                     target: mx.nd.NDArray,
-                     target_length: int) -> Tuple[mx.nd.NDArray, mx.nd.NDArray,
-                                                  mx.nd.NDArray, mx.nd.NDArray]:
+                             source: mx.nd.NDArray,
+                             source_length: int,
+                             target: mx.nd.NDArray,
+                             target_length: int) -> Tuple[mx.nd.NDArray, mx.nd.NDArray, mx.nd.NDArray, mx.nd.NDArray]:
         """
         Translates multiple source sentences to their corresponding target sentences to get their model scores.
         :param source: Source ids. Shape: (batch_size, bucket_key).
@@ -1338,14 +1338,11 @@ class Translator:
         # scores_accumulated: chosen smallest scores in scores (ascending).
         scores_accumulated = mx.nd.zeros((self.batch_size, 1), ctx=self.context)
 
-        # reset all padding distribution cells to np.inf
-        self.pad_dist[:] = np.inf
-
+        pad_dist = mx.nd.full((self.batch_size, len(self.vocab_target)), val=np.inf, ctx=self.context)
         # If using a top-k lexicon, select param rows for logit computation that correspond to the
         # target vocab for this sentence.
         models_output_layer_w = list()
         models_output_layer_b = list()
-        pad_dist = self.pad_dist
         vocab_slice_ids = None  # type: mx.nd.NDArray
         if self.restrict_lexicon:
             # TODO: See note in method about migrating to pure MXNet when set operations are supported.

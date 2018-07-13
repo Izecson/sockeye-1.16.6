@@ -176,6 +176,7 @@ def test_training_arg(test_params, expected_params):
 @pytest.mark.parametrize("test_params, expected_params", [
     ('-m model', dict(input=None,
                       output=None,
+                      target=None,
                       checkpoints=None,
                       models=['model'],
                       beam_size=5,

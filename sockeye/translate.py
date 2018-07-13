@@ -53,6 +53,9 @@ def main():
     if args.checkpoints is not None:
         check_condition(len(args.checkpoints) == len(args.models), "must provide checkpoints for each model")
 
+    if args.target is not None:
+        args.beam_size = 1
+
     log_basic_info(args)
 
     output_handler = sockeye.output_handler.get_output_handler(args.output_type,
@@ -86,11 +89,11 @@ def main():
                                                   vocab_source,
                                                   vocab_target,
                                                   restrict_lexicon)
-        read_and_translate(translator, output_handler, args.chunk_size, args.input)
+        read_and_translate(translator, output_handler, args.chunk_size, args.input, args.target)
 
 
 def read_and_translate(translator: sockeye.inference.Translator, output_handler: sockeye.output_handler.OutputHandler,
-                       chunk_size: Optional[int], source: Optional[str] = None) -> None:
+                       chunk_size: Optional[int], source: Optional[str] = None, target: Optional[str] = None) -> None:
     """
     Reads from either a file or stdin and translates each line, calling the output_handler with the result.
 
@@ -100,6 +103,7 @@ def read_and_translate(translator: sockeye.inference.Translator, output_handler:
     :param source: Path to file which will be translated line-by-line if included, if none use stdin.
     """
     source_data = sys.stdin if source is None else sockeye.data_io.smart_open(source)
+    target_data = None if target is None else sockeye.data_io.smart_open(target)
 
     batch_size = translator.batch_size
     if chunk_size is None:
@@ -118,10 +122,16 @@ def read_and_translate(translator: sockeye.inference.Translator, output_handler:
     logger.info("Translating...")
 
     total_time, total_lines = 0.0, 0
-    for chunk in grouper(source_data, chunk_size):
-        chunk_time = translate(output_handler, chunk, translator, total_lines)
-        total_lines += len(chunk)
-        total_time += chunk_time
+    if target_data is None:
+        for chunk in grouper(source_data, chunk_size):
+            chunk_time = translate(output_handler, chunk, None, translator, total_lines)
+            total_lines += len(chunk)
+            total_time += chunk_time
+    else:
+        for chunk in zip(grouper(source_data, chunk_size), grouper(target_data, chunk_size)):
+            chunk_time = translate(output_handler, *chunk, translator, total_lines)
+            total_lines += len(chunk)
+            total_time += chunk_time
 
     if total_lines != 0:
         logger.info("Processed %d lines in %d batches. Total time: %.4f, sec/sent: %.4f, sent/sec: %.4f",
@@ -131,8 +141,8 @@ def read_and_translate(translator: sockeye.inference.Translator, output_handler:
         logger.info("Processed 0 lines.")
 
 
-def translate(output_handler: sockeye.output_handler.OutputHandler, source_data: Iterable[str],
-                    translator: sockeye.inference.Translator, chunk_id: int = 0) -> float:
+def translate(output_handler: sockeye.output_handler.OutputHandler, source_data: Iterable[str], target_data: Iterable[str],
+              translator: sockeye.inference.Translator, chunk_id: int = 0) -> float:
     """
     Translates each line from source_data, calling output handler after translating a batch.
 
@@ -144,8 +154,13 @@ def translate(output_handler: sockeye.output_handler.OutputHandler, source_data:
     """
 
     tic = time.time()
-    trans_inputs = [translator.make_input(i, line) for i, line in enumerate(source_data, chunk_id + 1)]
-    trans_outputs = translator.translate(trans_inputs)
+    if target_data is None:
+        trans_inputs = [translator.make_input(i, line) for i, line in enumerate(source_data, chunk_id + 1)]
+        trans_outputs = translator.translate(trans_inputs)
+    else:
+        trans_inputs = [translator.make_scorer_input(i, *line) for i, line in enumerate(zip(source_data, target_data), chunk_id + 1)]
+        trans_outputs = translator.run_scorer(trans_inputs)
+
     total_time = time.time() - tic
     batch_time = total_time / len(trans_inputs)
     for trans_input, trans_output in zip(trans_inputs, trans_outputs):

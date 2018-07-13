@@ -929,6 +929,10 @@ def add_inference_args(params):
                                help='Output file to write translations to. '
                                     'If not given, will write to stdout.')
 
+    decode_params.add_argument(C.INFERENCE_ARG_TARGET_LONG, C.INFERENCE_ARG_TARGET_SHORT,
+                               default=None,
+                               help='Reference file. One sentence per line.')
+
     decode_params.add_argument('--models', '-m',
                                required=True,
                                nargs='+',

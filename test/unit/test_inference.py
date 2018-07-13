@@ -30,10 +30,10 @@ def test_concat_translations():
 
     expected_score = (1 + 2 + 3) / length_penalty(len(expected_target_ids))
 
-    translations = [sockeye.inference.Translation([0, 1, 2, -1], np.zeros((4, NUM_SRC)), 1.0 / length_penalty(4)),
+    translations = [sockeye.inference.Translation([0, 1, 2, -1], np.zeros((4, NUM_SRC)), 1.0 / length_penalty(4), []),
                     # Translation without EOS
-                    sockeye.inference.Translation([0, 8, 9], np.zeros((3, NUM_SRC)), 2.0 / length_penalty(3)),
-                    sockeye.inference.Translation([0, 3, 4, 5, -1], np.zeros((5, NUM_SRC)), 3.0 / length_penalty(5))]
+                    sockeye.inference.Translation([0, 8, 9], np.zeros((3, NUM_SRC)), 2.0 / length_penalty(3), []),
+                    sockeye.inference.Translation([0, 3, 4, 5, -1], np.zeros((5, NUM_SRC)), 3.0 / length_penalty(5), [])]
     combined = sockeye.inference._concat_translations(translations, start_id=_BOS, stop_ids={_EOS},
                                                       length_penalty=length_penalty)
 

@@ -174,6 +174,8 @@ _TRAIN_PARAMS_PREPARED_DATA_COMMON = "--use-cpu --max-seq-len {max_len} --prepar
 
 _TRANSLATE_PARAMS_COMMON = "--use-cpu --models {model} --input {input} --output {output} {quiet}"
 
+_TRANSLATE_PARAMS_SCORE = "--use-cpu --models {model} --input {input} --target {target} --output {output} {quiet}"
+
 _TRANSLATE_PARAMS_RESTRICT = "--restrict-lexicon {json}"
 
 _EVAL_PARAMS_COMMON = "--hypotheses {hypotheses} --references {references} --metrics {metrics} {quiet}"
@@ -291,6 +293,25 @@ def run_train_translate(train_params: str,
             with open(out_path_equiv, 'rt') as f:
                 lines_equiv = f.readlines()
             assert all(a == b for a, b in zip(lines, lines_equiv))
+
+        # Test scorer with the 1st params
+        out_path_score = os.path.join(work_dir, "out.txt")
+        params = "{} {} {}".format(sockeye.translate.__file__,
+                                   _TRANSLATE_PARAMS_SCORE.format(model=model_path,
+                                                                   input=test_source_path,
+                                                                   target=test_target_path,
+                                                                   output=out_path_score,
+                                                                   quiet=quiet_arg),
+                                   translate_params)
+        with patch.object(sys, "argv", params.split()):
+            sockeye.translate.main()
+
+        # read-in model output and reference, ensure they are the same
+        with open(test_target_path, 'rt') as f:
+            lines_ref = f.readlines()
+        with open(out_path_score, 'rt') as f:
+            lines = f.readlines()
+        assert all(a == b for a, b in zip(lines, lines_ref))
 
         # Test restrict-lexicon
         out_restrict_path = os.path.join(work_dir, "out-restrict.txt")
