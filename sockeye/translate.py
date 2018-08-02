@@ -60,7 +60,8 @@ def main():
 
     output_handler = sockeye.output_handler.get_output_handler(args.output_type,
                                                                args.output,
-                                                               args.sure_align_threshold)
+                                                               args.sure_align_threshold,
+                                                               args.output_attention_type)
 
     with ExitStack() as exit_stack:
         context = _setup_context(args, exit_stack)
@@ -74,6 +75,7 @@ def main():
             args.checkpoints,
             args.softmax_temperature,
             args.max_output_length_num_stds,
+            args.output_attention_type,
             decoder_return_logit_inputs=args.restrict_lexicon is not None,
             cache_output_layer_w_b=args.restrict_lexicon is not None)
         restrict_lexicon = None # type: TopKLexicon
@@ -88,7 +90,9 @@ def main():
                                                   models,
                                                   vocab_source,
                                                   vocab_target,
-                                                  restrict_lexicon)
+                                                  restrict_lexicon,
+                                                  args.output_attention_type,
+                                                  args.output_attention_head_id)
         read_and_translate(translator, output_handler, args.chunk_size, args.input, args.target)
 
 

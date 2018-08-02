@@ -371,7 +371,7 @@ class MultiHeadAttentionBase:
 
         # (batch*heads, query_max_length, depth_per_head)
         contexts, attention_probs = dot_attention(queries, keys, values,
-                                 lengths=lengths, dropout=self.dropout, bias=bias, prefix=self.prefix)
+                                                  lengths=lengths, dropout=self.dropout, bias=bias, prefix=self.prefix)
 
         # (batch, query_max_length, depth)
         contexts = combine_heads(contexts, self.depth_per_head, self.heads)

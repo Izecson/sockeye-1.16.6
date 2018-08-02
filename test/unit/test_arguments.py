@@ -179,6 +179,8 @@ def test_training_arg(test_params, expected_params):
                       target=None,
                       checkpoints=None,
                       models=['model'],
+                      output_attention_type='encoder_decoder_attention',
+                      output_attention_head_id=0,
                       beam_size=5,
                       batch_size=1,
                       chunk_size=None,

@@ -60,7 +60,8 @@ class InferenceModel(model.SockeyeModel):
                  softmax_temperature: Optional[float] = None,
                  max_output_length_num_stds: int = C.DEFAULT_NUM_STD_MAX_OUTPUT_LENGTH,
                  decoder_return_logit_inputs: bool = False,
-                 cache_output_layer_w_b: bool = False) -> None:
+                 cache_output_layer_w_b: bool = False,
+                 output_attention_type: str = C.ENCODER_DECODER_ATTENTION) -> None:
         self.model_version = utils.load_version(os.path.join(model_folder, C.VERSION_NAME))
         logger.info("Model version: %s", self.model_version)
         utils.check_version(self.model_version)
@@ -93,6 +94,8 @@ class InferenceModel(model.SockeyeModel):
         self.cache_output_layer_w_b = cache_output_layer_w_b
         self.output_layer_w = None  # type: mx.nd.NDArray
         self.output_layer_b = None  # type: mx.nd.NDArray
+
+        self.output_attention_type = output_attention_type
 
     def initialize(self, max_input_length: int, get_max_output_length_function: Callable):
         """
@@ -165,11 +168,20 @@ class InferenceModel(model.SockeyeModel):
 
             # encoder
             # source_encoded: (source_encoded_length, batch_size, encoder_depth)
-            (source_encoded,
-             source_encoded_length,
-             source_encoded_seq_len) = self.encoder.encode(source_embed,
-                                                           source_embed_length,
-                                                           source_embed_seq_len)
+            if self.output_attention_type == C.ENCODER_SELF_ATTENTION:
+                (source_encoded,
+                 attention_probs,
+                 source_encoded_length,
+                 source_encoded_seq_len) = self.encoder.encode_with_attention(source_embed,
+                                                                              source_embed_length,
+                                                                              source_embed_seq_len)
+            else:
+                attention_probs = mx.sym.zeros_like(source)
+                (source_encoded,
+                 source_encoded_length,
+                 source_encoded_seq_len) = self.encoder.encode(source_embed,
+                                                               source_embed_length,
+                                                               source_embed_seq_len)
 
             # initial decoder states
             decoder_init_states = self.decoder.init_states(source_encoded,
@@ -178,7 +190,7 @@ class InferenceModel(model.SockeyeModel):
 
             data_names = [C.SOURCE_NAME]
             label_names = []  # type: List[str]
-            return mx.sym.Group(decoder_init_states), data_names, label_names
+            return mx.sym.Group([attention_probs] + decoder_init_states), data_names, label_names
 
         default_bucket_key = self.max_input_length
         module = mx.mod.BucketingModule(sym_gen=sym_gen,
@@ -219,7 +231,8 @@ class InferenceModel(model.SockeyeModel):
             # decoder
             # target_decoded: (batch_size, decoder_depth)
             (target_decoded,
-             attention_probs,
+             enc_dec_attention,
+             dec_attention,
              states) = self.decoder.decode_step(decode_step,
                                                 target_embed_prev,
                                                 source_encoded_seq_len,
@@ -237,7 +250,11 @@ class InferenceModel(model.SockeyeModel):
 
             data_names = [C.TARGET_NAME] + state_names
             label_names = []  # type: List[str]
-            return mx.sym.Group([outputs, attention_probs] + states), data_names, label_names
+
+            # TODO: is there better ways
+            if dec_attention is None:
+                dec_attention = mx.sym.zeros_like(enc_dec_attention)
+            return mx.sym.Group([outputs, enc_dec_attention, dec_attention] + states), data_names, label_names
 
         # pylint: disable=not-callable
         default_bucket_key = (self.max_input_length, self.get_max_output_length(self.max_input_length))
@@ -276,7 +293,7 @@ class InferenceModel(model.SockeyeModel):
 
     def run_encoder(self,
                     source: mx.nd.NDArray,
-                    source_max_length: int) -> 'ModelState':
+                    source_max_length: int) -> Tuple['ModelState', mx.sym.Symbol]:
         """
         Runs forward pass of the encoder.
         Encodes source given source length and bucket key.
@@ -293,10 +310,11 @@ class InferenceModel(model.SockeyeModel):
                                 provide_data=self._get_encoder_data_shapes(source_max_length))
 
         self.encoder_module.forward(data_batch=batch, is_train=False)
-        decoder_states = self.encoder_module.get_outputs()
+        outputs = self.encoder_module.get_outputs()
+        enc_attention, decoder_states = outputs[0], outputs[1:]
         # replicate encoder/init module results beam size times
         decoder_states = [mx.nd.repeat(s, repeats=self.beam_size, axis=0) for s in decoder_states]
-        return ModelState(decoder_states)
+        return ModelState(decoder_states), enc_attention
 
     def run_decoder(self,
                     prev_word: mx.nd.NDArray,
@@ -313,8 +331,8 @@ class InferenceModel(model.SockeyeModel):
             bucket_key=bucket_key,
             provide_data=self._get_decoder_data_shapes(bucket_key))
         self.decoder_module.forward(data_batch=batch, is_train=False)
-        out, attention_probs, *model_state.states = self.decoder_module.get_outputs()
-        return out, attention_probs, model_state
+        out, enc_dec_attention, dec_attention, *model_state.states = self.decoder_module.get_outputs()
+        return out, enc_dec_attention, dec_attention, model_state
 
     @property
     def training_max_seq_len_source(self) -> int:
@@ -359,6 +377,7 @@ def load_models(context: mx.context.Context,
                 checkpoints: Optional[List[int]] = None,
                 softmax_temperature: Optional[float] = None,
                 max_output_length_num_stds: int = C.DEFAULT_NUM_STD_MAX_OUTPUT_LENGTH,
+                output_attention_type: str = C.ENCODER_DECODER_ATTENTION,
                 decoder_return_logit_inputs: bool = False,
                 cache_output_layer_w_b: bool = False) -> Tuple[List[InferenceModel], Dict[str, int], Dict[str, int]]:
     """
@@ -391,7 +410,8 @@ def load_models(context: mx.context.Context,
                                softmax_temperature=softmax_temperature,
                                checkpoint=checkpoint,
                                decoder_return_logit_inputs=decoder_return_logit_inputs,
-                               cache_output_layer_w_b=cache_output_layer_w_b)
+                               cache_output_layer_w_b=cache_output_layer_w_b,
+                               output_attention_type=output_attention_type)
         models.append(model)
 
     utils.check_condition(vocab.are_identical(*source_vocabs), "Source vocabulary ids do not match")
@@ -747,13 +767,17 @@ class Translator:
                  models: List[InferenceModel],
                  vocab_source: Dict[str, int],
                  vocab_target: Dict[str, int],
-                 restrict_lexicon: Optional[lexicon.TopKLexicon] = None) -> None:
+                 restrict_lexicon: Optional[lexicon.TopKLexicon] = None,
+                 output_attention_type: Optional[str] = C.ENCODER_DECODER_ATTENTION,
+                 output_attention_head_id: Optional[int] = 0) -> None:
         self.context = context
         self.length_penalty = length_penalty
         self.vocab_source = vocab_source
         self.vocab_target = vocab_target
         self.vocab_target_inv = vocab.reverse_vocab(self.vocab_target)
         self.restrict_lexicon = restrict_lexicon
+        self.output_attention_type = output_attention_type
+        self.output_attention_head_id = output_attention_head_id
         self.start_id = self.vocab_target[C.BOS_SYMBOL]
         self.stop_ids = {self.vocab_target[C.EOS_SYMBOL], C.PAD_ID}  # type: Set[int]
         self.models = models
@@ -1050,7 +1074,7 @@ class Translator:
         """
         return self._get_best_from_beam(*self._beam_search(source, source_length))
 
-    def _encode(self, sources: mx.nd.NDArray, source_length: int) -> List[ModelState]:
+    def _encode(self, sources: mx.nd.NDArray, source_length: int) -> List[Tuple[ModelState, mx.sym.Symbol]]:
         """
         Returns a ModelState for each model representing the state of the model after encoding the source.
 
@@ -1067,7 +1091,7 @@ class Translator:
                      states: List[ModelState],
                      models_output_layer_w: List[mx.nd.NDArray],
                      models_output_layer_b: List[mx.nd.NDArray]) \
-            -> Tuple[mx.nd.NDArray, mx.nd.NDArray, List[ModelState]]:
+            -> Tuple[mx.nd.NDArray, mx.nd.NDArray, mx.nd.NDArray, List[ModelState]]:
         """
         Returns decoder predictions (combined from all models), attention scores, and updated states.
 
@@ -1082,11 +1106,11 @@ class Translator:
         bucket_key = (source_length, step)
         prev_word = sequences[:, step - 1]
 
-        model_probs, model_attention_probs, model_states = [], [], []
+        model_probs, enc_dec_attention_probs, dec_attention_probs, model_states = [], [], [], []
         # We use zip_longest here since we'll have empty lists when not using restrict_lexicon
         for model, out_w, out_b, state in itertools.zip_longest(
                 self.models, models_output_layer_w, models_output_layer_b, states):
-            decoder_outputs, attention_probs, state = model.run_decoder(prev_word, bucket_key, state)
+            decoder_outputs, enc_dec_attention, dec_attention, state = model.run_decoder(prev_word, bucket_key, state)
             # Compute logits and softmax with restricted vocabulary
             if self.restrict_lexicon:
                 logits = model.output_layer(decoder_outputs, out_w, out_b)
@@ -1095,10 +1119,19 @@ class Translator:
                 # Otherwise decoder outputs are already target vocab probs
                 probs = decoder_outputs
             model_probs.append(probs)
-            model_attention_probs.append(attention_probs)
+            dec_attention_probs.append(dec_attention)
+            enc_dec_attention_probs.append(enc_dec_attention)
             model_states.append(state)
-        neg_logprobs, attention_probs = self._combine_predictions(model_probs, model_attention_probs)
-        return neg_logprobs, attention_probs, model_states
+
+        # average attention prob scores. TODO: is there a smarter way to do this?
+        dec_attention_probs = self._combine_attentions(dec_attention_probs)
+        neg_logprobs, enc_dec_attention_probs = self._combine_predictions(model_probs, enc_dec_attention_probs)
+        return neg_logprobs, enc_dec_attention_probs, dec_attention_probs, model_states
+
+    def _combine_attentions(self,
+                            attention_probs: List[mx.nd.NDArray]) -> mx.nd.NDArray:
+        # average attention prob scores. TODO: is there a smarter way to do this?
+        return utils.average_arrays(attention_probs)
 
     def _combine_predictions(self,
                              probs: List[mx.nd.NDArray],
@@ -1193,19 +1226,20 @@ class Translator:
                 models_output_layer_b.append(m.output_layer_b.take(vocab_slice_ids))
 
         # (0) encode source sentence, returns a list
-        model_states = self._encode(source, source_length)
+        states = self._encode(source, source_length)
+        model_states = [state[0] for state in states]
+        enc_attentions = self._combine_attentions([state[1] for state in states])
 
         for t in range(1, max_output_length):
 
             # (1) obtain next predictions and advance models' state
             # scores: (batch_size * beam_size, target_vocab_size)
-            # attention_scores: (batch_size * beam_size, bucket_key)
-            scores, attention_scores, model_states = self._decode_step(sequences,
-                                                                       t,
-                                                                       source_length,
-                                                                       model_states,
-                                                                       models_output_layer_w,
-                                                                       models_output_layer_b)
+            scores, enc_dec_attention, dec_attention, model_states = self._decode_step(sequences,
+                                                                                       t,
+                                                                                       source_length,
+                                                                                       model_states,
+                                                                                       models_output_layer_w,
+                                                                                       models_output_layer_b)
 
             # (2) compute length-normalized accumulated scores in place
             if t == 1 and self.batch_size == 1:  # only one hypothesis at t==1
@@ -1241,14 +1275,19 @@ class Translator:
             sequences = mx.nd.take(sequences, best_hyp_indices)
             lengths = mx.nd.take(lengths, best_hyp_indices)
             finished = mx.nd.take(finished, best_hyp_indices)
-            attention_scores = mx.nd.take(attention_scores, best_hyp_indices)
+            enc_dec_attention = mx.nd.take(enc_dec_attention, best_hyp_indices)
+            dec_attention = mx.nd.take(dec_attention, best_hyp_indices)
             attentions = mx.nd.take(attentions, best_hyp_indices)
 
             # (5) update best hypotheses, their attention lists and lengths (only for non-finished hyps)
             # pylint: disable=unsupported-assignment-operation
             sequences[:, t] = best_word_indices
-            attentions[:, :, t, :] = attention_scores
             lengths += mx.nd.cast(1 - mx.nd.expand_dims(finished, axis=1), dtype='float32')
+
+            if self.output_attention_type == C.DECODER_SELF_ATTENTION:
+                attentions[:, :, t, :t] = dec_attention
+            else:
+                attentions[:, :, t, :] = enc_dec_attention
 
             # (6) determine which hypotheses in the beam are now finished
             finished = ((best_word_indices == C.PAD_ID) + (best_word_indices == self.vocab_target[C.EOS_SYMBOL]))
@@ -1259,7 +1298,12 @@ class Translator:
             for ms in model_states:
                 ms.sort_state(best_hyp_indices)
 
-        return sequences, attentions, scores_accumulated, lengths
+        if self.output_attention_type == C.ENCODER_SELF_ATTENTION:
+            output_attentions = enc_attentions
+        else:
+            output_attentions = attentions
+
+        return sequences, output_attentions, scores_accumulated, lengths
 
     def _get_best_from_beam(self,
                             sequences: mx.nd.NDArray,
@@ -1280,7 +1324,7 @@ class Translator:
                               == accumulated_scores.shape[0] == lengths.shape[0], "Shape mismatch")
         # sequences & accumulated scores are in latest 'k-best order', thus 0th element is best
         best = 0
-        head = 0
+        head = self.output_attention_head_id
         result = []
         for sent in range(self.batch_size):
             idx = sent * self.beam_size + best
@@ -1296,7 +1340,7 @@ class Translator:
                 k_best.append((_seq, _score))
 
             # attention_matrix: (target_seq_len, source_seq_len)
-            attention_matrix = np.stack(attention_lists[idx].asnumpy()[head, :length, :], axis=0)
+            attention_matrix = np.stack(attention_lists[idx].asnumpy()[head, :, :], axis=0)
             result.append(Translation(sequence, attention_matrix, score, k_best))
         return result
 
@@ -1375,19 +1419,21 @@ class Translator:
         offset = np.repeat(np.arange(0, self.batch_size, 1), 1)
 
         # (0) encode source sentence, returns a list
-        model_states = self._encode(source, source_length)
+        states = self._encode(source, source_length)
+        model_states = [state[0] for state in states]
+        enc_attentions = self._combine_attentions([state[1] for state in states])
 
         for t in range(1, target_length):
 
             # (1) obtain next predictions and advance models' state
             # scores: (batch_size, target_vocab_size)
             # attention_scores: (batch_size, bucket_key)
-            scores, attention_scores, model_states = self._decode_step(sequences,
-                                                                       t,
-                                                                       source_length,
-                                                                       model_states,
-                                                                       models_output_layer_w,
-                                                                       models_output_layer_b)
+            scores, enc_dec_attention, dec_attention, model_states = self._decode_step(sequences,
+                                                                                       t,
+                                                                                       source_length,
+                                                                                       model_states,
+                                                                                       models_output_layer_w,
+                                                                                       models_output_layer_b)
 
             # (2) compute length-normalized accumulated scores in place
             if t == 1 and self.batch_size == 1:  # only one hypothesis at t==1
@@ -1414,22 +1460,32 @@ class Translator:
             # (5) update best hypotheses, their attention lists and lengths (only for non-finished hyps)
             # pylint: disable=unsupported-assignment-operation
             sequences[:, t] = best_word_indices
-            attentions[:, :, t, :] = attention_scores
             lengths += mx.nd.cast(1 - mx.nd.expand_dims(finished, axis=1), dtype='float32')
+
+            if self.output_attention_type == C.DECODER_SELF_ATTENTION:
+                attentions[:, :, t, :t] = dec_attention
+            else:
+                attentions[:, :, t, :] = enc_dec_attention
 
             # (7) determine which hypotheses in the beam are now finished
             finished = ((best_word_indices == C.PAD_ID) + (best_word_indices == self.vocab_target[C.EOS_SYMBOL]))
             if mx.nd.sum(finished).asscalar() == self.batch_size:  # all finished
                 break
 
-        head = 0
+        if self.output_attention_type == C.ENCODER_SELF_ATTENTION:
+            output_attentions = enc_attentions
+        else:
+            output_attentions = attentions
+
+        head = self.output_attention_head_id
         result = []
         for sent in range(self.batch_size):
             idx = sent
             length = int(lengths[idx].asscalar())
             sequence = sequences[idx][:length].asnumpy().tolist()
             # attention_matrix: (target_seq_len, source_seq_len)
-            attention_matrix = np.stack(attentions[idx].asnumpy()[head, :length, :], axis=0)
+            attention_matrix = np.stack(output_attentions[idx].asnumpy()[head, :, :], axis=0)
+            # attention_matrix = np.stack(np.average(output_attentions[idx].asnumpy(), axis=0), axis=0)
             score = scores_accumulated[idx].asscalar()
             result.append(Translation(sequence, attention_matrix, score, [(sequence, score)]))
 

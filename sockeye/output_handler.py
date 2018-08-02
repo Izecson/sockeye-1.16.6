@@ -23,7 +23,8 @@ from sockeye.utils import plot_attention, print_attention_text, get_alignments
 
 def get_output_handler(output_type: str,
                        output_fname: Optional[str],
-                       sure_align_threshold: float) -> 'OutputHandler':
+                       sure_align_threshold: float,
+                       output_attention_type: str) -> 'OutputHandler':
     """
 
     :param output_type: Type of output handler.
@@ -44,9 +45,9 @@ def get_output_handler(output_type: str,
     elif output_type == C.OUTPUT_HANDLER_BENCHMARK:
         return BenchmarkOutputHandler(output_stream)
     elif output_type == C.OUTPUT_HANDLER_ALIGN_PLOT:
-        return AlignPlotHandler(plot_prefix="align" if output_fname is None else output_fname)
+        return AlignPlotHandler(output_attention_type, plot_prefix="align" if output_fname is None else output_fname)
     elif output_type == C.OUTPUT_HANDLER_ALIGN_TEXT:
-        return AlignTextHandler(sure_align_threshold)
+        return AlignTextHandler(output_attention_type, sure_align_thresholds)
     else:
         raise ValueError("unknown output type")
 
@@ -226,7 +227,8 @@ class AlignPlotHandler(OutputHandler):
     :param plot_prefix: Prefix for generated PNG files.
     """
 
-    def __init__(self, plot_prefix: str) -> None:
+    def __init__(self, output_attention_type: str, plot_prefix: str) -> None:
+        self.output_attention_type = output_attention_type
         self.plot_prefix = plot_prefix
 
     def handle(self,
@@ -238,10 +240,21 @@ class AlignPlotHandler(OutputHandler):
         :param t_output: Translator output.
         :param t_walltime: Total wall-clock time for translation.
         """
-        plot_attention(t_output.attention_matrix,
-                       t_input.tokens,
-                       t_output.tokens,
-                       "%s_%d.png" % (self.plot_prefix, t_input.id))
+        if self.output_attention_type == C.ENCODER_DECODER_ATTENTION:
+            plot_attention(t_output.attention_matrix,
+                           t_input.tokens,
+                           t_output.tokens,
+                           "%s_%d.png" % (self.plot_prefix, t_input.id))
+        elif self.output_attention_type == C.ENCODER_SELF_ATTENTION:
+            plot_attention(t_output.attention_matrix,
+                           t_input.tokens,
+                           t_input.tokens,
+                           "%s_%d.png" % (self.plot_prefix, t_input.id))
+        else:
+            plot_attention(t_output.attention_matrix,
+                           t_output.tokens,
+                           t_output.tokens,
+                           "%s_%d.png" % (self.plot_prefix, t_input.id))
 
 
 class AlignTextHandler(OutputHandler):
@@ -251,7 +264,8 @@ class AlignTextHandler(OutputHandler):
     :param threshold: Threshold for considering alignment links as sure.
     """
 
-    def __init__(self, threshold: float) -> None:
+    def __init__(self, output_attention_type: str, threshold: float) -> None:
+        self.output_attention_type = output_attention_type
         self.threshold = threshold
 
     def handle(self,
@@ -263,7 +277,18 @@ class AlignTextHandler(OutputHandler):
         :param t_output: Translator output.
         :param t_walltime: Total wall-clock time for translation.
         """
-        print_attention_text(t_output.attention_matrix,
-                             t_input.tokens,
-                             t_output.tokens,
-                             self.threshold)
+        if self.output_attention_type == C.ENCODER_DECODER_ATTENTION:
+            print_attention_text(t_output.attention_matrix,
+                                 t_input.tokens,
+                                 t_output.tokens,
+                                 self.threshold)
+        elif self.output_attention_type == C.ENCODER_SELF_ATTENTION:
+            print_attention_text(t_output.attention_matrix,
+                                 t_input.tokens,
+                                 t_input.tokens,
+                                 self.threshold)
+        else:
+            print_attention_text(t_output.attention_matrix,
+                                 t_output.tokens,
+                                 t_output.tokens,
+                                 self.threshold)

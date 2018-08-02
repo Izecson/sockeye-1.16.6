@@ -338,7 +338,7 @@ def plot_attention(attention_matrix: np.ndarray, source_tokens: List[str], targe
         raise RuntimeError("Please install matplotlib.")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    assert attention_matrix.shape[0] == len(target_tokens)
+    # assert attention_matrix.shape[0] == len(target_tokens)
 
     plt.imshow(attention_matrix.transpose(), interpolation="nearest", cmap="Greys")
     plt.xlabel("target")
@@ -412,6 +412,8 @@ def average_arrays(arrays: List[mx.nd.NDArray]) -> mx.nd.NDArray:
     :param arrays: A list of NDArrays with the same shape that will be averaged.
     :return: The average of the NDArrays in the same context as arrays[0].
     """
+    if len(arrays) == 0:
+        return None
     if len(arrays) == 1:
         return arrays[0]
     check_condition(all(arrays[0].shape == a.shape for a in arrays), "nd array shapes do not match")

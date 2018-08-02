@@ -308,6 +308,14 @@ OUTPUT_HANDLERS = [OUTPUT_HANDLER_TRANSLATION,
                    OUTPUT_HANDLER_ALIGN_PLOT,
                    OUTPUT_HANDLER_ALIGN_TEXT]
 
+# attention visualization
+ENCODER_DECODER_ATTENTION = "encoder_decoder_attention"
+ENCODER_SELF_ATTENTION = "encoder_self_attention"
+DECODER_SELF_ATTENTION = "decoder_self_attention"
+ATTENTION_TYPES = [ENCODER_DECODER_ATTENTION,
+                   ENCODER_SELF_ATTENTION,
+                   DECODER_SELF_ATTENTION]
+
 # metrics
 ACCURACY = 'accuracy'
 PERPLEXITY = 'perplexity'

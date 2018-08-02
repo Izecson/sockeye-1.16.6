@@ -566,6 +566,25 @@ class EncoderSequence(Encoder):
             data, data_length, seq_len = encoder.encode(data, data_length, seq_len)
         return data, data_length, seq_len
 
+    def encode_with_attention(self,
+                              data: mx.sym.Symbol,
+                              data_length: mx.sym.Symbol,
+                              seq_len: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, mx.sym.Symbol, int]:
+        """
+        Encodes data given sequence lengths of individual examples and maximum sequence length.
+
+        :param data: Input data.
+        :param data_length: Vector with sequence lengths.
+        :param seq_len: Maximum sequence length.
+        :return: Encoded versions of input data (data, data_length, seq_len).
+        """
+        for encoder in self.encoders:
+            if isinstance(encoder, TransformerEncoder):
+                data, attention_probs, data_length, seq_len = encoder.encode_with_attention(data, data_length, seq_len)
+            else:
+                data, data_length, seq_len = encoder.encode(data, data_length, seq_len)
+        return data, attention_probs, data_length, seq_len
+
     def get_num_hidden(self) -> int:
         """
         Return the representation size of this encoder.
@@ -818,9 +837,37 @@ class TransformerEncoder(Encoder):
 
         for i, layer in enumerate(self.layers):
             # (batch_size, seq_len, config.model_size)
-            data = layer(data, bias)
+            data, _ = layer(data, bias)
         data = self.final_process(data=data, prev=None)
         return data, data_length, seq_len
+
+    def encode_with_attention(self,
+                              data: mx.sym.Symbol,
+                              data_length: mx.sym.Symbol,
+                              seq_len: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, mx.sym.Symbol, int]:
+        """
+        Encodes data given sequence lengths of individual examples and maximum sequence length.
+
+        :param data: Input data.
+        :param data_length: Vector with sequence lengths.
+        :param seq_len: Maximum sequence length.
+        :return: Encoded versions of input data data, data_length, seq_len.
+        """
+        if self.config.dropout_prepost > 0.0:
+            data = mx.sym.Dropout(data=data, p=self.config.dropout_prepost)
+
+        # (batch_size * heads, 1, max_length)
+        bias = mx.sym.expand_dims(transformer.get_variable_length_bias(lengths=data_length,
+                                                                       max_length=seq_len,
+                                                                       num_heads=self.config.attention_heads,
+                                                                       fold_heads=True,
+                                                                       name="%sbias" % self.prefix), axis=1)
+
+        for i, layer in enumerate(self.layers):
+            # (batch_size, seq_len, config.model_size)
+            data, attention_probs = layer(data, bias)
+        data = self.final_process(data=data, prev=None)
+        return data, attention_probs, data_length, seq_len
 
     def get_num_hidden(self) -> int:
         """

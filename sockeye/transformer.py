@@ -11,7 +11,7 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import mxnet as mx
 import numpy as np
@@ -94,16 +94,16 @@ class TransformerEncoderBlock:
 
     def __call__(self, data: mx.sym.Symbol, bias: mx.sym.Symbol) -> mx.sym.Symbol:
         # self-attention
-        data_self_att, _ = self.self_attention(inputs=self.pre_self_attention(data, None),
-                                            bias=bias,
-                                            cache=None)
+        data_self_att, enc_attention = self.self_attention(inputs=self.pre_self_attention(data, None),
+                                                           bias=bias,
+                                                           cache=None)
         data = self.post_self_attention(data_self_att, data)
 
         # feed-forward
         data_ff = self.ff(self.pre_ff(data, None))
         data = self.post_ff(data_ff, data)
 
-        return data
+        return data, enc_attention
 
 
 class TransformerDecoderBlock:
@@ -163,11 +163,11 @@ class TransformerDecoderBlock:
                  target_bias: mx.sym.Symbol,
                  source: mx.sym.Symbol,
                  source_bias: mx.sym.Symbol,
-                 cache: Optional[Dict[str, Optional[mx.sym.Symbol]]] = None) -> mx.sym.Symbol:
+                 cache: Optional[Dict[str, Optional[mx.sym.Symbol]]] = None) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, mx.sym.Symbol]:
         # self-attention
-        target_self_att, _ = self.self_attention(inputs=self.pre_self_attention(target, None),
-                                              bias=target_bias,
-                                              cache=cache)
+        target_self_att, dec_attention = self.self_attention(inputs=self.pre_self_attention(target, None),
+                                                             bias=target_bias,
+                                                             cache=cache)
         target = self.post_self_attention(target_self_att, target)
 
         # encoder attention
@@ -180,7 +180,7 @@ class TransformerDecoderBlock:
         target_ff = self.ff(self.pre_ff(target, None))
         target = self.post_ff(target_ff, target)
 
-        return target, enc_attention
+        return target, enc_attention, dec_attention
 
 
 class TransformerProcessBlock:

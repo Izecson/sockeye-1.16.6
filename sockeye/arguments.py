@@ -945,6 +945,17 @@ def add_inference_args(params):
                                help='If not given, chooses best checkpoints for model(s). '
                                     'If specified, must have the same length as --models and be integer')
 
+    decode_params.add_argument('--output-attention-type',
+                               type=str,
+                               default=C.ENCODER_DECODER_ATTENTION,
+                               choices=C.ATTENTION_TYPES,
+                               help='Type of the attention to visualize. Default: %(default)s.')
+
+    decode_params.add_argument('--output-attention-head-id',
+                               type=int_greater_or_equal(0),
+                               default=0,
+                               help='Specify which attention head to visualize if there are multiple heads. Default: %(default)s.')
+
     decode_params.add_argument('--beam-size', '-b',
                                type=int_greater_or_equal(1),
                                default=5,
