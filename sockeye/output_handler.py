@@ -252,7 +252,7 @@ class AlignPlotHandler(OutputHandler):
                            "%s_%d.png" % (self.plot_prefix, t_input.id))
         else:
             plot_attention(t_output.attention_matrix,
-                           t_output.tokens,
+                           ['<s>'] + t_output.tokens,
                            t_output.tokens,
                            "%s_%d.png" % (self.plot_prefix, t_input.id))
 
@@ -289,6 +289,6 @@ class AlignTextHandler(OutputHandler):
                                  self.threshold)
         else:
             print_attention_text(t_output.attention_matrix,
-                                 t_output.tokens,
+                                 ['<s>'] + t_output.tokens,
                                  t_output.tokens,
                                  self.threshold)
